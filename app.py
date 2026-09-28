@@ -1,558 +1,236 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
+
 import streamlit as st
-import requests
-import os
-from dotenv import load_dotenv
-import google.generativeai as genai
 
-
-# ============================================================
-# LOAD ENVIRONMENT VARIABLES
-# ============================================================
-
-load_dotenv()
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY")
-
-
-# ============================================================
-# CHECK API KEYS
-# ============================================================
-
-if not GEMINI_API_KEY:
-    st.error("❌ GEMINI_API_KEY is missing from .env")
-
-if not NEWSDATA_API_KEY:
-    st.error("❌ NEWSDATA_API_KEY is missing from .env")
-
-
-# ============================================================
-# CONFIGURE GEMINI
-# ============================================================
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
-    model = genai.GenerativeModel(
-        "gemini-2.5-flash"
-    )
-
-
-# ============================================================
-# AGENT 1 — NEWS COLLECTOR
-# ============================================================
-
-def news_collector_agent(topic):
-
-    url = "https://newsdata.io/api/1/latest"
-
-    params = {
-        "apikey": NEWSDATA_API_KEY,
-        "q": topic,
-        "language": "en"
-    }
-
-    try:
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=10
-        )
-
-        # Debug information
-        print("NewsData status:", response.status_code)
-        print("NewsData response:", response.text)
-
-        # API error
-        if response.status_code != 200:
-
-            st.error(
-                f"❌ NewsData.io API Error: "
-                f"{response.status_code}"
-            )
-
-            st.code(response.text)
-
-            return []
-
-        data = response.json()
-
-        # Check API response
-        if data.get("status") == "error":
-
-            st.error("❌ NewsData.io returned an error.")
-
-            st.code(str(data))
-
-            return []
-
-        articles = []
-
-        results = data.get("results", [])
-
-        for article in results[:5]:
-
-            articles.append({
-
-                "title": article.get(
-                    "title",
-                    "No title available"
-                ),
-
-                "description": article.get(
-                    "description",
-                    "No description available"
-                ),
-
-                "source": article.get(
-                    "source_name",
-                    "Unknown source"
-                ),
-
-                "url": article.get(
-                    "link",
-                    ""
-                )
-            })
-
-        return articles
-
-    except requests.exceptions.Timeout:
-
-        st.error(
-            "⏱️ NewsData.io request timed out. "
-            "Please try again."
-        )
-
-        return []
-
-    except requests.exceptions.ConnectionError:
-
-        st.error(
-            "🌐 Could not connect to NewsData.io. "
-            "Check your internet connection."
-        )
-
-        return []
-
-    except Exception as e:
-
-        st.error(
-            f"❌ Unexpected NewsData error: {e}"
-        )
-
-        return []
-
-
-# ============================================================
-# AGENT 2 — FACT CHECKER
-# ============================================================
-
-def fact_checker_agent(articles):
-
-    if not articles:
-
-        return "No articles available for fact checking."
-
-
-    # Combine articles
-    news_text = ""
-
-    for i, article in enumerate(articles, 1):
-
-        news_text += f"""
-
-ARTICLE {i}
-
-Title:
-{article["title"]}
-
-Source:
-{article["source"]}
-
-Description:
-{article["description"]}
-
-URL:
-{article["url"]}
-
-----------------------------------------
-"""
-
-
-    prompt = f"""
-You are the Fact-Checking Agent of an Agentic AI system.
-
-Analyze the news articles provided below.
-
-Your tasks:
-
-1. Identify the major factual claims.
-2. Compare information between the available articles.
-3. Classify each claim as one of:
-   VERIFIED
-   CONTRADICTED
-   INSUFFICIENT EVIDENCE
-
-4. Give a short explanation.
-5. Mention the sources supporting the claim.
-
-IMPORTANT RULES:
-
-- Do not invent facts.
-- Do not invent sources.
-- Use only the information provided.
-- If the evidence is insufficient, say so.
-
-NEWS ARTICLES:
-
-{news_text}
-"""
-
-
-    try:
-
-        response = model.generate_content(prompt)
-
-        return response.text
-
-    except Exception as e:
-
-        return f"""
-❌ Gemini Fact Checker Error:
-
-{str(e)}
-"""
-
-
-# ============================================================
-# AGENT 3 — DAILY DIGEST GENERATOR
-# ============================================================
-
-def digest_agent(articles, fact_check):
-
-    if not articles:
-
-        return "No news available."
-
-
-    news_text = ""
-
-    for article in articles:
-
-        news_text += f"""
-
-Title:
-{article["title"]}
-
-Source:
-{article["source"]}
-
-Description:
-{article["description"]}
-
-URL:
-{article["url"]}
-
-"""
-
-
-    prompt = f"""
-You are the Daily News Digest Agent.
-
-Create a concise and readable news digest.
-
-For each important story include:
-
-📰 HEADLINE
-
-📝 SUMMARY
-
-🔎 FACT-CHECK STATUS
-
-📚 SOURCE
-
-Use the fact-checking report provided below.
-
-Possible fact-check statuses:
-
-VERIFIED
-CONTRADICTED
-INSUFFICIENT EVIDENCE
-
-Do not invent information.
-
-NEWS:
-
-{news_text}
-
-FACT-CHECK REPORT:
-
-{fact_check}
-"""
-
-
-    try:
-
-        response = model.generate_content(prompt)
-
-        return response.text
-
-    except Exception as e:
-
-        return f"""
-❌ Gemini Digest Error:
-
-{str(e)}
-"""
-
-
-# ============================================================
-# ORCHESTRATOR
-# ============================================================
-
-def run_agents(topic):
-
-    # ------------------------------------
-    # STEP 1
-    # ------------------------------------
-
-    st.info(
-        "🔎 Agent 1: Collecting latest news..."
-    )
-
-    articles = news_collector_agent(topic)
-
-
-    if not articles:
-
-        return [], "No articles found.", "No digest available."
-
-
-    # ------------------------------------
-    # STEP 2
-    # ------------------------------------
-
-    st.info(
-        "🛡️ Agent 2: Fact-checking information..."
-    )
-
-    fact_check = fact_checker_agent(
-        articles
-    )
-
-
-    # ------------------------------------
-    # STEP 3
-    # ------------------------------------
-
-    st.info(
-        "📝 Agent 3: Generating news digest..."
-    )
-
-    digest = digest_agent(
-        articles,
-        fact_check
-    )
-
-
-    return articles, fact_check, digest
-
-
-# ============================================================
-# STREAMLIT PAGE CONFIGURATION
-# ============================================================
+from agents import (
+    AgentError,
+    configured_keys,
+    export_markdown,
+    extract_claims,
+    fact_check_claim,
+    get_saved_claims,
+    get_saved_digests,
+    run_daily_digest,
+    save_checked_claims,
+)
 
 st.set_page_config(
-
-    page_title="Fact-Checker & Daily News Digest",
-
-    page_icon="📰",
-
-    layout="wide"
+    page_title="Fact-check desk",
+    page_icon=":material/fact_check:",
+    layout="wide",
 )
 
+st.title("Fact-check desk")
+st.caption("Check claims against live sources. Build and save a sourced daily news digest.")
 
-# ============================================================
-# HEADER
-# ============================================================
+with st.sidebar:
+    st.subheader("Connected services")
+    for key_name, available in configured_keys().items():
+        label = key_name.removesuffix("_API_KEY").replace("_", " ").title()
+        st.write(f"{'Ready' if available else 'Missing'} · {label}")
+    st.caption("Keys are loaded from your local .env file and are never shown here.")
 
-st.title(
-    "📰 Fact-Checker & Daily News Digest"
-)
-
-st.write(
-    "An Agentic AI system that collects news, "
-    "fact-checks information, and generates "
-    "a concise daily digest."
-)
-
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-
-st.sidebar.title(
-    "🤖 Agentic AI Pipeline"
-)
-
-st.sidebar.markdown(
-"""
-### 🔎 Agent 1
-**News Collector Agent**
-
-Collects recent news using NewsData.io.
-
----
-
-### 🛡️ Agent 2
-**Fact Checker Agent**
-
-Analyzes claims and compares available sources using Gemini.
-
----
-
-### 📝 Agent 3
-**Digest Generator Agent**
-
-Creates the final concise news digest.
-
----
-
-### 🔄 Orchestrator
-
-Coordinates the complete agent workflow.
-"""
-)
+def render_sources(sources: list[dict[str, Any]]) -> None:
+    if not sources:
+        st.caption("No live sources were available for this check.")
+        return
+    for source in sources:
+        direction = source.get("search_direction", "evidence")
+        st.markdown(f"[{source.get('title', 'Source')}]({source.get('url', '')})")
+        date_label = f" · {source['published_date']}" if source.get("published_date") else ""
+        st.caption(f"{direction.title()} search{date_label}")
+        if source.get("content"):
+            st.write(source["content"])
 
 
-# ============================================================
-# USER INPUT
-# ============================================================
+def render_check(result: dict[str, Any]) -> None:
+    st.subheader(result.get("claim", "Claim"))
+    first, second = st.columns(2)
+    first.metric("Verdict", result.get("verdict", "Unverifiable"))
+    second.metric("Confidence", f"{result.get('confidence', 0)}%")
+    st.write(result.get("summary", ""))
+    supporting = result.get("supporting_evidence", [])
+    challenging = result.get("challenging_evidence", [])
+    if supporting:
+        st.markdown("**Evidence supporting the claim**")
+        for item in supporting:
+            st.write(f"- {item}")
+    if challenging:
+        st.markdown("**Evidence challenging the claim**")
+        for item in challenging:
+            st.write(f"- {item}")
+    with st.expander(f"Sources ({len(result.get('sources', []))})"):
+        render_sources(result.get("sources", []))
+    if result.get("archive_matches"):
+        with st.expander("Related checks in the archive"):
+            for archived in result["archive_matches"]:
+                st.write(f"**{archived.get('verdict', 'Unverifiable')}** · {archived.get('claim', '')}")
+                st.caption("Historical check; not used as live evidence.")
 
-topic = st.text_input(
 
-    "🔍 Enter a news topic",
+fact_tab, digest_tab, archive_tab = st.tabs(["Fact-check claims", "Daily digest", "Saved work"])
 
-    placeholder="Example: Artificial Intelligence"
-)
-
-
-# ============================================================
-# BUTTON
-# ============================================================
-
-generate = st.button(
-
-    "🚀 Generate News Digest",
-
-    type="primary"
-)
-
-
-# ============================================================
-# RUN AGENTS
-# ============================================================
-
-if generate:
-
-    if not topic.strip():
-
-        st.warning(
-            "⚠️ Please enter a news topic."
+with fact_tab:
+    st.subheader("Check a claim or forwarded message")
+    with st.form("claim_check_form"):
+        claim_text = st.text_area(
+            "Text to check",
+            placeholder="Paste a claim, article excerpt, or forwarded message. The checker will separate it into factual claims.",
+            height=160,
+        )
+        claim_topic = st.text_input("Topic label (optional)", placeholder="Health, elections, science…")
+        submitted = st.form_submit_button(
+            "Extract claims and check evidence",
+            type="primary",
+            icon=":material/search:",
         )
 
-    elif not GEMINI_API_KEY or not NEWSDATA_API_KEY:
-
-        st.error(
-            "❌ Please check your API keys in the .env file."
-        )
-
-    else:
-
-        articles, fact_check, digest = run_agents(
-            topic
-        )
-
-
-        # ====================================================
-        # COLLECTED NEWS
-        # ====================================================
-
-        st.header(
-            "📰 Collected News"
-        )
-
-
-        if articles:
-
-            for article in articles:
-
-                st.subheader(
-                    article["title"]
-                )
-
-                st.write(
-                    f"**Source:** {article['source']}"
-                )
-
-                if article["description"]:
-
-                    st.write(
-                        article["description"]
-                    )
-
-                if article["url"]:
-
-                    st.markdown(
-                        f"🔗 [Read Original Article]"
-                        f"({article['url']})"
-                    )
-
-                st.divider()
-
+    if submitted:
+        missing = [name for name in ("GEMINI_API_KEY", "TAVILY_API_KEY") if not configured_keys()[name]]
+        if missing:
+            st.error("Configure " + " and ".join(missing) + " in .env before checking claims.")
+        elif not claim_text.strip():
+            st.warning("Paste some text or enter a claim first.")
         else:
+            st.session_state["claim_results"] = []
+            try:
+                with st.status("Extracting and checking claims", expanded=True) as progress:
+                    claims = extract_claims(claim_text)
+                    if not claims:
+                        progress.update(label="No checkable factual claims found", state="complete")
+                        st.info("Try a message containing a specific factual statement.")
+                    else:
+                        results = []
+                        for index, claim in enumerate(claims, start=1):
+                            progress.update(label=f"Checking claim {index} of {len(claims)}")
+                            try:
+                                results.append(fact_check_claim(claim))
+                            except AgentError as error:
+                                results.append({
+                                    "claim": claim,
+                                    "verdict": "Unverifiable",
+                                    "confidence": 0,
+                                    "summary": f"The check could not be completed: {error}",
+                                    "sources": [],
+                                    "supporting_evidence": [],
+                                    "challenging_evidence": [],
+                                    "archive_matches": [],
+                                })
+                        save_checked_claims(claim_topic.strip() or "Pasted text", results)
+                        st.session_state["claim_results"] = results
+                        progress.update(label=f"Checked and saved {len(results)} claim(s)", state="complete")
+            except AgentError as error:
+                st.error(str(error))
 
-            st.warning(
-                "No news articles were found."
-            )
+    for result in st.session_state.get("claim_results", []):
+        st.divider()
+        render_check(result)
 
-
-        # ====================================================
-        # FACT CHECK
-        # ====================================================
-
-        st.header(
-            "🛡️ Fact-Checking Report"
+with digest_tab:
+    st.subheader("Compile a verified news digest")
+    st.write("NewsData gathers recent articles; Tavily finds evidence for and against each story; Gemini writes the sourced digest.")
+    with st.form("daily_digest_form"):
+        topic = st.text_input("News topic", placeholder="Technology, public health, climate…")
+        article_limit = st.slider("Number of stories", min_value=1, max_value=5, value=3)
+        digest_submitted = st.form_submit_button(
+            "Build today's digest",
+            type="primary",
+            icon=":material/newspaper:",
         )
 
-        st.markdown(
-            fact_check
+    if digest_submitted:
+        required_keys = ("GEMINI_API_KEY", "NEWSDATA_API_KEY", "TAVILY_API_KEY")
+        missing = [name for name in required_keys if not configured_keys()[name]]
+        if missing:
+            st.error("Configure " + ", ".join(missing) + " in .env before building a digest.")
+        elif not topic.strip():
+            st.warning("Enter a topic for today's digest.")
+        else:
+            try:
+                with st.status("Building the daily digest", expanded=True) as progress:
+                    progress.update(label="Collecting articles and checking each story against live sources")
+                    record = run_daily_digest(topic.strip(), article_limit)
+                    st.session_state["latest_digest"] = record
+                    progress.update(label="Digest checked and saved", state="complete")
+            except AgentError as error:
+                st.error(str(error))
+
+    latest = st.session_state.get("latest_digest")
+    if latest:
+        st.divider()
+        st.markdown(latest["digest"])
+        st.download_button(
+            "Download digest as Markdown",
+            data=latest["digest"],
+            file_name=f"news-digest-{date.today().isoformat()}.md",
+            mime="text/markdown",
+            icon=":material/download:",
         )
+        with st.expander(f"Reviewed stories ({len(latest.get('articles', []))})"):
+            for article, check in zip(latest.get("articles", []), latest.get("checks", [])):
+                st.markdown(f"**{article['title']}** · {check['verdict']} · {check['confidence']}%")
+                if article.get("url"):
+                    st.markdown(f"[Original article]({article['url']})")
+                render_sources(check.get("sources", []))
 
+with archive_tab:
+    st.subheader("Saved checks and digests")
+    saved_claims = get_saved_claims()
+    saved_digests = get_saved_digests()
+    st.caption(f"{len(saved_claims)} saved claim checks · {len(saved_digests)} saved digests")
 
-        # ====================================================
-        # DAILY DIGEST
-        # ====================================================
+    this_week = st.checkbox("Show checks from the last 7 days only")
+    if this_week:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        saved_claims = [
+            record for record in saved_claims
+            if record.get("checked_at")
+            and datetime.fromisoformat(record["checked_at"].replace("Z", "+00:00")) >= cutoff
+        ]
 
-        st.header(
-            "📋 Daily News Digest"
+    if saved_claims:
+        claim_ids = [record["id"] for record in saved_claims]
+        selected_claim_id = st.selectbox(
+            "Saved claim checks",
+            claim_ids,
+            format_func=lambda item_id: next(
+                f"{record.get('verdict', 'Unverifiable')} · {record.get('claim', '')[:100]}"
+                for record in saved_claims if record["id"] == item_id
+            ),
         )
-
-        st.markdown(
-            digest
+        selected_claim = next(record for record in saved_claims if record["id"] == selected_claim_id)
+        render_check(selected_claim)
+        st.download_button(
+            "Export selected check",
+            data=export_markdown([selected_claim]),
+            file_name="fact-check-report.md",
+            mime="text/markdown",
+            icon=":material/download:",
         )
+    else:
+        st.info("No claim checks found in this date range.")
 
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.divider()
-
-st.caption(
-    "Agentic AI Pipeline: "
-    "News Collection → Fact Checking → "
-    "Digest Generation"
-)
+    if saved_digests:
+        digest_ids = [record["id"] for record in saved_digests]
+        selected_digest_id = st.selectbox(
+            "Saved digests",
+            digest_ids,
+            format_func=lambda item_id: next(
+                f"{record.get('date', '')} · {record.get('topic', '')}"
+                for record in saved_digests if record["id"] == item_id
+            ),
+        )
+        selected_digest = next(record for record in saved_digests if record["id"] == selected_digest_id)
+        st.markdown(selected_digest.get("digest", ""))
+        st.download_button(
+            "Export selected digest",
+            data=selected_digest.get("digest", ""),
+            file_name=f"news-digest-{selected_digest.get('date', date.today().isoformat())}.md",
+            mime="text/markdown",
+            icon=":material/download:",
+        )
+    else:
+        st.info("Daily digests you build will appear here.")
