@@ -47,6 +47,34 @@ streamlit run app.py
 
 Open the local URL printed by Streamlit.
 
+## MCP server
+
+The project includes a separate MCP server using stdio transport. It exposes three tools:
+
+- `save_digest`: store a digest and its topic, articles, and checks in the local archive.
+- `get_saved_claims`: retrieve saved checks, optionally filtering by topic and verdict.
+- `export_markdown`: write a saved claim report or digest to `exports/`.
+
+Run it directly with the project environment:
+
+```powershell
+.\.venv\Scripts\python.exe mcp_server.py
+```
+
+To connect it from VS Code, add a server entry to `.vscode/mcp.json` (adjust the paths if the project is elsewhere):
+
+```json
+{
+  "servers": {
+    "fact-check-digest": {
+      "type": "stdio",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": ["${workspaceFolder}\\mcp_server.py"]
+    }
+  }
+}
+```
+
 ## Workflows
 
 - **Fact-check claims:** paste a statement or forwarded message; Gemini separates factual claims, Tavily searches for supporting and challenging evidence, and a bounded critic pass can request more sources. Each result has a conservative verdict, confidence, evidence summary, and source links.
