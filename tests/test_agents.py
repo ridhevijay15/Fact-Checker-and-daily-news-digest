@@ -30,23 +30,25 @@ class AgentTests(unittest.TestCase):
             json=lambda: {"candidates": [{"content": {"parts": [{"text": "{\"ok\": true}"}]}}]},
         )
         with patch.dict("os.environ", {"GEMINI_API_KEY": "local-test-key"}), patch.object(
-            agents.requests, "post", side_effect=[busy, ready]
-        ) as request:
+            agents.requests, "post", side_effect=[busy, busy, ready]
+        ) as request, patch.object(agents.time, "sleep") as wait:
             result = agents._generate_json("test prompt")
 
         self.assertEqual(result, {"ok": True})
         self.assertIn("gemini-3.8-flash", request.call_args_list[0].args[0])
-        self.assertIn("gemini-3.7-flash", request.call_args_list[1].args[0])
+        self.assertIn("gemini-3.8-flash", request.call_args_list[1].args[0])
+        self.assertIn("gemini-3.7-flash", request.call_args_list[2].args[0])
+        wait.assert_called_once_with(1.0)
 
     def test_gemini_reports_temporary_capacity_after_all_fallbacks(self):
         busy = unittest.mock.Mock(status_code=503)
         with patch.dict("os.environ", {"GEMINI_API_KEY": "local-test-key"}), patch.object(
             agents.requests, "post", return_value=busy
-        ) as request:
+        ) as request, patch.object(agents.time, "sleep"):
             with self.assertRaisesRegex(agents.AgentError, "temporarily at high capacity"):
                 agents._generate_json("test prompt")
 
-        self.assertEqual(request.call_count, len(agents.GEMINI_MODELS))
+        self.assertEqual(request.call_count, len(agents.GEMINI_MODELS) + 1)
 
     def test_extract_claims_trims_and_deduplicates(self):
         with patch.object(agents, "_generate_json", return_value={"claims": [" Claim A ", "Claim A", "Claim B"]}):

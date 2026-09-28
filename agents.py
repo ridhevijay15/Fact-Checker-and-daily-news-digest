@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,19 +47,29 @@ def _generate_json(prompt: str) -> dict[str, Any]:
     if not api_key:
         raise AgentError("GEMINI_API_KEY is not configured in the environment or .env file.")
     response = None
-    for model_name in GEMINI_MODELS:
-        try:
-            response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
-                params={"key": api_key},
-                json={
-                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                    "generationConfig": {"responseMimeType": "application/json"},
-                },
-                timeout=45,
-            )
-        except requests.RequestException as exc:
-            raise AgentError(f"Could not connect to Gemini ({type(exc).__name__}). Check your connection and retry.") from exc
+    for model_index, model_name in enumerate(GEMINI_MODELS):
+        attempts = 2 if model_index == 0 else 1
+        for attempt in range(attempts):
+            try:
+                response = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+                    params={"key": api_key},
+                    json={
+                        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                        "generationConfig": {"responseMimeType": "application/json"},
+                    },
+                    timeout=45,
+                )
+            except requests.RequestException as exc:
+                raise AgentError(f"Could not connect to Gemini ({type(exc).__name__}). Check your connection and retry.") from exc
+            if response.status_code != 503:
+                break
+            if attempt + 1 < attempts:
+                try:
+                    retry_delay = float(response.headers.get("Retry-After", "1"))
+                except (AttributeError, TypeError, ValueError):
+                    retry_delay = 1.0
+                time.sleep(min(max(retry_delay, 0.5), 3.0))
         if response.status_code != 503:
             break
 
