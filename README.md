@@ -9,17 +9,24 @@ The app combines recent news retrieval, AI-assisted claim extraction, web eviden
 ## Architecture
 
 ```text
-User input
-   ├── Claim checker: Gemini extracts claims
-   │      └── Tavily searches supporting and challenging evidence
-   │             └── Gemini judges; critic may request bounded follow-up searches
-   └── Daily digest: NewsData.io retrieves articles
-     └── Each story is evidence-checked with Tavily and Gemini
-       └── Gemini writes a sourced Markdown digest
-         └── Local JSON archive and Markdown export
+Claim-check LangGraph:
+Claim Extractor -> Claim Checker -> Fact-check subgraph -> Claim Archive
+              Evidence Retriever -> Verdict Judge -> Critic
+                ^                               |
+                +--- at most two searches ------+
+
+Daily-digest LangGraph:
+NewsData Collector -> Story Fact Checker -> Digest Writer -> Digest Archive
+
+Retrieval context: BM25-ranked saved checks + trusted-source domain notes
+MCP tools: save_digest, get_saved_claims, export_markdown
 ```
 
 Verdicts are `True`, `False`, `Misleading`, or `Unverifiable`. Missing or inconclusive evidence is reported as `Unverifiable`, not guessed. Archived checks are historical context, not a substitute for current sources.
+
+## RAG knowledge base
+
+The retriever uses BM25 to rank previously checked claims across claim text, summary, and topic, then supplies relevant verdicts, dates, and source links as historical context to the judge. The curated `knowledge/trusted_sources.json` registry records publisher domains, source types, and scope/limitation notes. Matching registry entries are included with live evidence and shown with citations. Registry notes are review guidance, not proof or an automatic reliability score; maintain the list as sources and coverage change.
 
 ## Requirements
 
@@ -87,4 +94,4 @@ To connect it from VS Code, add a server entry to `.vscode/mcp.json` (adjust the
 python -m unittest discover -s tests -v
 ```
 
-Tests use mocked model responses and local temporary files; they do not make API calls.
+Tests use mocked model responses, local temporary files, and an in-memory MCP client/server session; they do not make external API calls.

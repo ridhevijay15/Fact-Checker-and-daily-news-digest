@@ -9,12 +9,10 @@ from agents import (
     AgentError,
     configured_keys,
     export_markdown,
-    extract_claims,
-    fact_check_claim,
     get_saved_claims,
     get_saved_digests,
     run_daily_digest,
-    save_checked_claims,
+    run_claim_checks,
 )
 
 st.set_page_config(
@@ -42,6 +40,14 @@ def render_sources(sources: list[dict[str, Any]]) -> None:
         st.markdown(f"[{source.get('title', 'Source')}]({source.get('url', '')})")
         date_label = f" · {source['published_date']}" if source.get("published_date") else ""
         st.caption(f"{direction.title()} search{date_label}")
+        registry_entry = source.get("trusted_source")
+        if registry_entry:
+            st.caption(
+                f"Registry: {registry_entry['name']} · {registry_entry['type']}. "
+                f"{registry_entry['credibility_note']}"
+            )
+        else:
+            st.caption("Not listed in the trusted-source registry; assess using evidence and corroboration.")
         if source.get("content"):
             st.write(source["content"])
 
@@ -98,28 +104,13 @@ with fact_tab:
             st.session_state["claim_results"] = []
             try:
                 with st.status("Extracting and checking claims", expanded=True) as progress:
-                    claims = extract_claims(claim_text)
+                    batch = run_claim_checks(claim_text, claim_topic.strip() or "Pasted text")
+                    claims = batch.get("claims", [])
                     if not claims:
                         progress.update(label="No checkable factual claims found", state="complete")
                         st.info("Try a message containing a specific factual statement.")
                     else:
-                        results = []
-                        for index, claim in enumerate(claims, start=1):
-                            progress.update(label=f"Checking claim {index} of {len(claims)}")
-                            try:
-                                results.append(fact_check_claim(claim))
-                            except AgentError as error:
-                                results.append({
-                                    "claim": claim,
-                                    "verdict": "Unverifiable",
-                                    "confidence": 0,
-                                    "summary": f"The check could not be completed: {error}",
-                                    "sources": [],
-                                    "supporting_evidence": [],
-                                    "challenging_evidence": [],
-                                    "archive_matches": [],
-                                })
-                        save_checked_claims(claim_topic.strip() or "Pasted text", results)
+                        results = batch.get("results", [])
                         st.session_state["claim_results"] = results
                         progress.update(label=f"Checked and saved {len(results)} claim(s)", state="complete")
             except AgentError as error:

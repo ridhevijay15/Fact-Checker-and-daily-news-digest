@@ -7,10 +7,13 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
+from langgraph.graph import END, START, StateGraph
+from rank_bm25 import BM25Okapi
 
 from tools.tavily_tool import TavilySearchError, search_web
 
@@ -21,6 +24,7 @@ MAX_CLAIMS_PER_SUBMISSION = 10
 DATA_DIR = Path(__file__).resolve().parent / "data"
 CLAIMS_FILE = DATA_DIR / "checked_claims.json"
 DIGESTS_FILE = DATA_DIR / "saved_digests.json"
+TRUSTED_SOURCES_FILE = Path(__file__).resolve().parent / "knowledge" / "trusted_sources.json"
 VERDICTS = {"True", "False", "Misleading", "Unverifiable"}
 GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-flash-lite-latest")
 
@@ -153,21 +157,80 @@ def _search_both_sides(claim: str) -> list[dict[str, str]]:
 
 def _find_related_checks(claim: str, limit: int = 3) -> list[dict[str, Any]]:
     ignored = {"about", "after", "before", "being", "could", "does", "from", "have", "into", "more", "that", "their", "there", "these", "this", "those", "what", "when", "where", "which", "while", "with", "would"}
-    terms = {term for term in re.findall(r"[a-z0-9]{4,}", claim.lower()) if term not in ignored}
-    matches = []
+    tokenize = lambda text: [term for term in re.findall(r"[a-z0-9]{3,}", text.lower()) if term not in ignored]
+    query_tokens = tokenize(claim)
+    if not query_tokens:
+        return []
+
+    documents = []
     for record in get_saved_claims():
-        prior_terms = {term for term in re.findall(r"[a-z0-9]{4,}", record.get("claim", "").lower()) if term not in ignored}
-        overlap = len(terms & prior_terms)
-        if overlap >= 2:
-            matches.append((overlap, record))
-    matches.sort(key=lambda item: (item[0], item[1].get("checked_at", "")), reverse=True)
-    return [record for _, record in matches[:limit]]
+        content = " ".join(str(record.get(field) or "") for field in ("claim", "summary", "topic"))
+        tokens = tokenize(content)
+        if tokens:
+            documents.append((record, tokens))
+    if not documents:
+        return []
+
+    ranker = BM25Okapi([tokens for _, tokens in documents])
+    scores = ranker.get_scores(query_tokens)
+    matches = []
+    query_terms = set(query_tokens)
+    for (record, tokens), score in zip(documents, scores):
+        overlap = len(query_terms & set(tokens))
+        if overlap:
+            matches.append((float(score), overlap, record))
+    matches.sort(key=lambda item: (item[0], item[1], item[2].get("checked_at", "")), reverse=True)
+    return [record for _, _, record in matches[:limit]]
+
+
+def _load_trusted_sources() -> list[dict[str, str]]:
+    try:
+        source_data = json.loads(TRUSTED_SOURCES_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    sources = source_data.get("sources", []) if isinstance(source_data, dict) else []
+    return [source for source in sources if isinstance(source, dict) and source.get("domain")]
+
+
+def _trusted_source_for_url(url: str) -> dict[str, str] | None:
+    hostname = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    matches = [
+        source for source in _load_trusted_sources()
+        if hostname == source["domain"].lower()
+        or hostname.endswith(f".{source['domain'].lower()}")
+    ]
+    if not matches:
+        return None
+    source = max(matches, key=lambda item: len(item["domain"]))
+    return {
+        "domain": source["domain"],
+        "name": str(source.get("name", source["domain"])),
+        "type": str(source.get("type", "")),
+        "credibility_note": str(source.get("credibility_note", "")),
+    }
+
+
+def _enrich_source_credibility(evidence: list[dict[str, str]]) -> list[dict[str, Any]]:
+    return [
+        {**source, "trusted_source": _trusted_source_for_url(source.get("url", ""))}
+        for source in evidence
+    ]
 
 
 def _judge_claim(claim: str, evidence: list[dict[str, str]], archive: list[dict[str, Any]]) -> dict[str, Any]:
-    evidence_text = json.dumps(evidence, ensure_ascii=False)
+    enriched_evidence = _enrich_source_credibility(evidence)
+    evidence_text = json.dumps(enriched_evidence, ensure_ascii=False)
     archive_text = json.dumps(
-        [{"claim": item.get("claim"), "verdict": item.get("verdict"), "checked_at": item.get("checked_at")} for item in archive],
+        [{
+            "claim": item.get("claim"),
+            "verdict": item.get("verdict"),
+            "summary": item.get("summary"),
+            "checked_at": item.get("checked_at"),
+            "sources": [
+                {"title": source.get("title"), "url": source.get("url"), "search_direction": source.get("search_direction")}
+                for source in item.get("sources", [])[:5]
+            ],
+        } for item in archive],
         ensure_ascii=False,
     )
     result = _generate_json(
@@ -177,10 +240,13 @@ def _judge_claim(claim: str, evidence: list[dict[str, str]], archive: list[dict[
         "it is not live evidence. Never treat lack of search results as proof. Use verdict True only "
         "when reliable evidence directly supports the claim; False when reliable evidence directly "
         "refutes it; Misleading when materially incomplete or distorted; otherwise Unverifiable. "
+        "Use trusted-source credibility notes as context, not as proof or an automatic ranking. "
+        "The archive context is retrieved from prior checks; use it to identify related findings and sources, "
+        "but independently assess current live evidence and never copy an archived verdict without checking. "
         "Return JSON with verdict, confidence (integer 0-100), summary, supporting_evidence (array of "
         "short explanations), challenging_evidence (array of short explanations), and needs_more_evidence "
         "(boolean). Do not invent facts, quotes, publishers, or URLs.\n\n"
-        f"CLAIM:\n{claim}\n\nLIVE SOURCES:\n{evidence_text}\n\nARCHIVE CONTEXT:\n{archive_text}"
+        f"CLAIM:\n{claim}\n\nLIVE SOURCES AND TRUSTED-SOURCE NOTES:\n{evidence_text}\n\nRETRIEVED ARCHIVE CONTEXT:\n{archive_text}"
     )
     verdict = result.get("verdict", "Unverifiable")
     normalized_verdict = next((item for item in VERDICTS if str(verdict).lower() == item.lower()), "Unverifiable")
@@ -198,43 +264,103 @@ def _judge_claim(claim: str, evidence: list[dict[str, str]], archive: list[dict[
     }
 
 
+class FactCheckState(TypedDict, total=False):
+    claim: str
+    evidence: list[dict[str, Any]]
+    archive: list[dict[str, Any]]
+    judgment: dict[str, Any]
+    followup_queries: list[str]
+    followup_rounds: int
+    should_continue: bool
+
+
+def _retrieve_evidence_node(state: FactCheckState) -> dict[str, Any]:
+    evidence = list(state.get("evidence", []))
+    followup_queries = state.get("followup_queries", [])
+    if not evidence:
+        return {"evidence": _search_both_sides(state["claim"])}
+
+    known_urls = {item["url"] for item in evidence}
+    added = []
+    for query in followup_queries[:2]:
+        try:
+            added.extend(_normalize_evidence(search_web(query, max_results=4), "critic follow-up"))
+        except (AgentError, TavilySearchError):
+            continue
+    new_items = [item for item in added if item["url"] not in known_urls]
+    return {
+        "evidence": evidence + new_items,
+        "followup_queries": [],
+        "followup_rounds": state.get("followup_rounds", 0) + 1,
+    }
+
+
+def _judge_node(state: FactCheckState) -> dict[str, Any]:
+    archive = state.get("archive")
+    if archive is None:
+        archive = _find_related_checks(state["claim"])
+    judgment = _judge_claim(state["claim"], state.get("evidence", []), archive)
+    return {"archive": archive, "judgment": judgment}
+
+
+def _critic_node(state: FactCheckState) -> dict[str, Any]:
+    judgment = state.get("judgment", {})
+    followup_rounds = state.get("followup_rounds", 0)
+    critique = _generate_json(
+        "You are the critic in a fact-checking workflow. Independently review every judge verdict for weak evidence, "
+        "source bias, missing context, and whether both supporting and challenging evidence were considered. "
+        "Do not issue a new verdict. If additional searches could materially improve the evidence, return "
+        "JSON with needs_more_evidence true and up to two concise followup_queries; otherwise return false.\n\n"
+        f"CLAIM: {state['claim']}\nJUDGMENT: {json.dumps(judgment)}\n"
+        f"SOURCES: {json.dumps(_enrich_source_credibility(state.get('evidence', [])))}"
+    )
+    queries = critique.get("followup_queries", [])
+    if not isinstance(queries, list):
+        queries = []
+    queries = list(dict.fromkeys(str(query).strip() for query in queries if str(query).strip()))[:2]
+    should_continue = bool(
+        critique.get("needs_more_evidence")
+        and queries
+        and followup_rounds < MAX_CRITIC_ROUNDS
+    )
+    return {"followup_queries": queries, "should_continue": should_continue}
+
+
+def _route_after_critic(state: FactCheckState) -> str:
+    return "retrieve" if state.get("should_continue") else "end"
+
+
+def _build_fact_check_graph() -> Any:
+    graph = StateGraph(FactCheckState)
+    graph.add_node("evidence_retriever", _retrieve_evidence_node)
+    graph.add_node("verdict_judge", _judge_node)
+    graph.add_node("critic", _critic_node)
+    graph.add_edge(START, "evidence_retriever")
+    graph.add_edge("evidence_retriever", "verdict_judge")
+    graph.add_edge("verdict_judge", "critic")
+    graph.add_conditional_edges(
+        "critic",
+        _route_after_critic,
+        {"retrieve": "evidence_retriever", "end": END},
+    )
+    return graph.compile()
+
+
+FACT_CHECK_GRAPH = _build_fact_check_graph()
+
+
 def fact_check_claim(claim: str) -> dict[str, Any]:
     claim = claim.strip()
     if not claim:
         raise AgentError("A claim is required.")
-    evidence = _search_both_sides(claim)
-    archive = _find_related_checks(claim)
-    judgment = _judge_claim(claim, evidence, archive)
-
-    for _ in range(MAX_CRITIC_ROUNDS):
-        if not judgment["needs_more_evidence"]:
-            break
-        critique = _generate_json(
-            "Review whether the verdict is adequately supported by the supplied sources, including "
-            "whether credible evidence from both sides was considered. Do not decide the verdict. "
-            "If another search could materially resolve uncertainty, return JSON with needs_more_evidence "
-            "true and up to two concise followup_queries; otherwise return false.\n\n"
-            f"CLAIM: {claim}\nJUDGMENT: {json.dumps(judgment)}\nSOURCES: {json.dumps(evidence)}"
-        )
-        queries = critique.get("followup_queries", [])
-        if not critique.get("needs_more_evidence") or not isinstance(queries, list):
-            break
-        added = []
-        for query in [str(value).strip() for value in queries[:2] if str(value).strip()]:
-            try:
-                added.extend(_normalize_evidence(search_web(query, max_results=4), "critic follow-up"))
-            except (AgentError, TavilySearchError):
-                continue
-        known_urls = {item["url"] for item in evidence}
-        evidence.extend(item for item in added if item["url"] not in known_urls)
-        judgment = _judge_claim(claim, evidence, archive)
-
+    state = FACT_CHECK_GRAPH.invoke({"claim": claim, "followup_rounds": 0})
+    judgment = state.get("judgment", {})
     judgment.pop("needs_more_evidence", None)
     return {
         "claim": claim,
         **judgment,
-        "sources": evidence,
-        "archive_matches": archive,
+        "sources": _enrich_source_credibility(state.get("evidence", [])),
+        "archive_matches": state.get("archive", []),
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -300,31 +426,8 @@ def digest_agent(topic: str, articles: list[dict[str, str]], checks: list[dict[s
 def run_daily_digest(topic: str, limit: int = 5) -> dict[str, Any]:
     if not topic.strip():
         raise AgentError("Enter a topic for the daily digest.")
-    articles = news_collector_agent(topic, limit)
-    if not articles:
-        raise AgentError("No news articles were found for that topic.")
-    checks = []
-    for article in articles:
-        claim = article["title"]
-        if article["description"]:
-            claim = f"{claim}. {article['description'][:500]}"
-        try:
-            checks.append(fact_check_claim(claim))
-        except AgentError as exc:
-            checks.append({
-                "claim": claim,
-                "verdict": "Unverifiable",
-                "confidence": 0,
-                "summary": f"Could not complete the evidence check: {exc}",
-                "sources": [],
-                "archive_matches": [],
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-            })
-    save_checked_claims(topic, checks)
-    digest = digest_agent(topic, articles, checks)
-    record = save_digest(topic, digest, articles, checks)
-    record["digest"] = digest
-    return record
+    result = DAILY_DIGEST_GRAPH.invoke({"topic": topic.strip(), "limit": limit})
+    return result["record"]
 
 
 def _read_records(path: Path) -> list[dict[str, Any]]:
@@ -401,3 +504,140 @@ def export_markdown(records: list[dict[str, Any]], title: str = "Fact-check repo
             lines.append("- No live sources available.")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+class ClaimBatchState(TypedDict, total=False):
+    text: str
+    topic: str
+    claims: list[str]
+    results: list[dict[str, Any]]
+    next_index: int
+
+
+def _claim_extractor_node(state: ClaimBatchState) -> dict[str, Any]:
+    return {"claims": extract_claims(state["text"]), "results": [], "next_index": 0}
+
+
+def _claim_checker_node(state: ClaimBatchState) -> dict[str, Any]:
+    claim = state["claims"][state["next_index"]]
+    results = list(state.get("results", []))
+    try:
+        results.append(fact_check_claim(claim))
+    except AgentError as exc:
+        results.append({
+            "claim": claim,
+            "verdict": "Unverifiable",
+            "confidence": 0,
+            "summary": f"The check could not be completed: {exc}",
+            "sources": [],
+            "supporting_evidence": [],
+            "challenging_evidence": [],
+            "archive_matches": [],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        })
+    return {"results": results, "next_index": state["next_index"] + 1}
+
+
+def _archive_claim_batch_node(state: ClaimBatchState) -> dict[str, Any]:
+    results = state.get("results", [])
+    if results:
+        save_checked_claims(state.get("topic", "Pasted text"), results)
+    return {}
+
+
+def _route_claim_batch(state: ClaimBatchState) -> str:
+    return "check" if state.get("next_index", 0) < len(state.get("claims", [])) else "save"
+
+
+def _build_claim_batch_graph() -> Any:
+    graph = StateGraph(ClaimBatchState)
+    graph.add_node("claim_extractor", _claim_extractor_node)
+    graph.add_node("claim_checker", _claim_checker_node)
+    graph.add_node("claim_archive", _archive_claim_batch_node)
+    graph.add_edge(START, "claim_extractor")
+    graph.add_conditional_edges(
+        "claim_extractor",
+        _route_claim_batch,
+        {"check": "claim_checker", "save": "claim_archive"},
+    )
+    graph.add_conditional_edges(
+        "claim_checker",
+        _route_claim_batch,
+        {"check": "claim_checker", "save": "claim_archive"},
+    )
+    graph.add_edge("claim_archive", END)
+    return graph.compile()
+
+
+CLAIM_BATCH_GRAPH = _build_claim_batch_graph()
+
+
+def run_claim_checks(text: str, topic: str = "Pasted text") -> dict[str, Any]:
+    if not text.strip():
+        raise AgentError("Paste some text or enter a claim first.")
+    return CLAIM_BATCH_GRAPH.invoke({"text": text, "topic": topic.strip() or "Pasted text"})
+
+
+class DailyDigestState(TypedDict, total=False):
+    topic: str
+    limit: int
+    articles: list[dict[str, str]]
+    checks: list[dict[str, Any]]
+    digest: str
+    record: dict[str, Any]
+
+
+def _news_collector_node(state: DailyDigestState) -> dict[str, Any]:
+    articles = news_collector_agent(state["topic"], state.get("limit", 5))
+    if not articles:
+        raise AgentError("No news articles were found for that topic.")
+    return {"articles": articles}
+
+
+def _daily_story_checker_node(state: DailyDigestState) -> dict[str, Any]:
+    checks = []
+    for article in state.get("articles", []):
+        claim = article["title"]
+        if article["description"]:
+            claim = f"{claim}. {article['description'][:500]}"
+        try:
+            checks.append(fact_check_claim(claim))
+        except AgentError as exc:
+            checks.append({
+                "claim": claim,
+                "verdict": "Unverifiable",
+                "confidence": 0,
+                "summary": f"Could not complete the evidence check: {exc}",
+                "sources": [],
+                "archive_matches": [],
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            })
+    return {"checks": checks}
+
+
+def _digest_writer_node(state: DailyDigestState) -> dict[str, Any]:
+    return {"digest": digest_agent(state["topic"], state.get("articles", []), state.get("checks", []))}
+
+
+def _digest_archive_node(state: DailyDigestState) -> dict[str, Any]:
+    checks = state.get("checks", [])
+    save_checked_claims(state["topic"], checks)
+    record = save_digest(state["topic"], state["digest"], state.get("articles", []), checks)
+    return {"record": record}
+
+
+def _build_daily_digest_graph() -> Any:
+    graph = StateGraph(DailyDigestState)
+    graph.add_node("news_collector", _news_collector_node)
+    graph.add_node("story_fact_checker", _daily_story_checker_node)
+    graph.add_node("digest_writer", _digest_writer_node)
+    graph.add_node("digest_archive", _digest_archive_node)
+    graph.add_edge(START, "news_collector")
+    graph.add_edge("news_collector", "story_fact_checker")
+    graph.add_edge("story_fact_checker", "digest_writer")
+    graph.add_edge("digest_writer", "digest_archive")
+    graph.add_edge("digest_archive", END)
+    return graph.compile()
+
+
+DAILY_DIGEST_GRAPH = _build_daily_digest_graph()

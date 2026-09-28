@@ -2,3 +2,5 @@ streamlit
 requests
 python-dotenv
 mcp>=1.0,<2
+langgraph>=1.0,<2
+rank-bm25>=0.2.2,<1

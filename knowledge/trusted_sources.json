@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "last_reviewed": "2026-09-28",
+  "sources": [
+    {
+      "domain": "who.int",
+      "name": "World Health Organization",
+      "type": "International public health authority",
+      "credibility_note": "Primary source for global health guidance, disease surveillance, and international health statistics. Check the publication date, population, and stated limitations."
+    },
+    {
+      "domain": "cdc.gov",
+      "name": "US Centers for Disease Control and Prevention",
+      "type": "US public health agency",
+      "credibility_note": "Primary source for US public health guidance and surveillance. Guidance can be jurisdiction-specific and may change; check dates and cited studies."
+    },
+    {
+      "domain": "nhs.uk",
+      "name": "National Health Service",
+      "type": "UK public health service",
+      "credibility_note": "Primary source for UK patient guidance and health-service information. Not a substitute for clinical advice; check local applicability and review dates."
+    },
+    {
+      "domain": "reuters.com",
+      "name": "Reuters",
+      "type": "International news agency",
+      "credibility_note": "Established wire service with editorial sourcing standards and a dedicated fact-check desk. For consequential claims, follow links to primary records and independent corroboration."
+    },
+    {
+      "domain": "apnews.com",
+      "name": "Associated Press",
+      "type": "International news agency",
+      "credibility_note": "Established wire service with editorial sourcing standards and a dedicated fact-check desk. Distinguish reported facts from analysis and verify claims against primary records."
+    },
+    {
+      "domain": "factcheck.org",
+      "name": "FactCheck.org",
+      "type": "Nonpartisan fact-checking organization",
+      "credibility_note": "Publishes sourced reviews of US political claims. Review the cited source material, scope, and publication date rather than relying on the verdict label alone."
+    },
+    {
+      "domain": "fullfact.org",
+      "name": "Full Fact",
+      "type": "Independent fact-checking organization",
+      "credibility_note": "Publishes evidence-linked fact checks, primarily on UK public-interest claims. Check the evidence, geographic scope, and date for relevance."
+    },
+    {
+      "domain": "snopes.com",
+      "name": "Snopes",
+      "type": "Fact-checking publication",
+      "credibility_note": "Investigates viral claims and rumors with cited material. Read the full analysis and cited sources; a rating may address only part of a broad claim."
+    },
+    {
+      "domain": "nature.com",
+      "name": "Nature",
+      "type": "Scientific publisher",
+      "credibility_note": "Publishes peer-reviewed research and science reporting. A single study is not a scientific consensus; distinguish research articles from news and commentary."
+    },
+    {
+      "domain": "pubmed.ncbi.nlm.nih.gov",
+      "name": "PubMed",
+      "type": "Biomedical literature index",
+      "credibility_note": "Indexes biomedical literature, including studies with different methods and evidence quality. Indexing is not an endorsement; inspect study design, publication type, and later reviews."
+    },
+    {
+      "domain": "ourworldindata.org",
+      "name": "Our World in Data",
+      "type": "Research and data publication",
+      "credibility_note": "Provides documented datasets and analysis with source links. Check definitions, underlying data, update dates, and methodological notes."
+    }
+  ]
+}
